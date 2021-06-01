@@ -11,19 +11,18 @@ module Qarma64(
   localparam STATE_IDLE = 1;
 
   reg state;
-  reg [4:0] round;
-  reg buf_ready;
+  reg [16:0] round;
 
-  reg [63:0]  buf_tweak;
-  reg [63:0]  buf_out;
-  reg [63:0]  buf_in;
-  reg [63:0]  buf_round_key;
+  reg [63:0] buf_tweak;
+  reg [63:0] buf_out;
+  reg [63:0] buf_in;
 
   assign out = buf_out;
-  assign ready = buf_ready;
+  assign ready = state == STATE_IDLE;
 
   function [3:0] Sbox (input [3:0] x);
   begin
+    /*
     case (x)
       0:  Sbox = 0;  1:  Sbox = 14;
       2:  Sbox = 2;  3:  Sbox = 10;
@@ -34,6 +33,13 @@ module Qarma64(
       12: Sbox = 13; 13: Sbox = 12;
       14: Sbox = 1;  15: Sbox = 5;
     endcase
+    */
+    Sbox = {
+      ~((x[3] | ~x[0]) & ~(~(x[1] & x[3]) & x[2])),
+      ((x[1] ^ x[0]) | (x[1] ^ x[3])) ^ x[1],
+      ~(~(x[1] & ~x[2]) & ~((x[3] ^ x[0]) & ~(x[3] & x[2]))),
+      ~((x[3] ^ x[1]) | ~(x[1] | x[2])) | ((x[0] ^ x[3]) & x[2])
+    };
   end
   endfunction
 
@@ -110,30 +116,6 @@ module Qarma64(
   end
   endfunction
 
-  function [63:0] RoundForward (input [63:0] buf_state, input [63:0] round_key);
-  begin
-    RoundForward = SubCells(MixColumns(ShuffleCells(buf_state ^ round_key)));
-  end
-  endfunction
-
-  function [63:0] PartialRoundForward (input [63:0] buf_state, input [63:0] round_key);
-  begin
-    PartialRoundForward = SubCells(buf_state ^ round_key);
-  end
-  endfunction
-
-  function [63:0] RoundBackwards (input [63:0] buf_state, input [63:0] round_key);
-  begin
-    RoundBackwards = ShuffleCellsBackwards(MixColumns(SubCells(buf_state))) ^ round_key;
-  end
-  endfunction
-
-  function [63:0] PartialRoundBackwards (input [63:0] buf_state, input [63:0] round_key);
-  begin
-    PartialRoundBackwards = SubCells(buf_state) ^ round_key;
-  end
-  endfunction
-
   function [3:0] LfsrForward (input [3:0] nibble);
   begin
     LfsrForward = { nibble[0]^nibble[1], nibble[3], nibble[2], nibble[1] };
@@ -188,149 +170,108 @@ module Qarma64(
   end
   endfunction
 
-  function [63:0] PseudoReflect (input [63:0] buf_state, input [63:0] round_key);
-  begin
-    PseudoReflect = ShuffleCellsBackwards(MixColumns(ShuffleCells(buf_state)) ^ round_key);
-  end
-  endfunction
+  // Shared SubCells circuitry.
+  wire [63:0] sub_cells_circuit_in;
+  wire [63:0] sub_cells_circuit;
 
+  assign sub_cells_circuit_in =
+    tmp2 ? round_forward_step2 : // rounds using RoundForward
+    buf_in; // rounds using RoundBackward
+  assign sub_cells_circuit = SubCells(sub_cells_circuit_in);
+
+  // RoundForward
+  wire [63:0] round_forward_round_key = round[7] ? buf_tweak ^ w1 : k0 ^ round_key ^ buf_tweak;
+  wire [63:0] round_forward_step1 = buf_in ^ round_forward_round_key;
+  wire [63:0] round_forward_step2 = round[0] ? round_forward_step1 : MixColumns(ShuffleCells(round_forward_step1));
   wire [63:0] round_circuit;
-  assign round_circuit = RoundForward(buf_in, buf_round_key);
+  assign round_circuit = sub_cells_circuit; //SubCells(round_forward_step2);
 
-  wire [63:0] partial_round_circuit;
-  assign partial_round_circuit = PartialRoundForward(buf_in, buf_round_key);
-
+  // RoundBackwards
+  wire [63:0] round_reverse_round_key = round[9] ? buf_tweak ^ w0 : k1 ^ round_key ^ buf_tweak ^ 64'hC0AC29B7C97C50DD;
+  wire [63:0] round_inv_circuit_step0 = sub_cells_circuit; //SubCells(buf_in);
+  wire [63:0] round_inv_circuit_step1 = round[16] ? round_inv_circuit_step0 : ShuffleCellsBackwards(MixColumns(round_inv_circuit_step0));
   wire [63:0] round_inv_circuit;
-  assign round_inv_circuit = RoundBackwards(buf_in, buf_round_key);
+  assign round_inv_circuit = round_inv_circuit_step1 ^ round_reverse_round_key;
 
-  wire [63:0] partial_round_inv_circuit;
-  assign partial_round_inv_circuit = PartialRoundBackwards(buf_in, buf_round_key);
-
+  // PseudoReflect
   wire [63:0] pseudo_reflect_circuit;
-  assign pseudo_reflect_circuit = PseudoReflect(buf_in, buf_round_key);
+  assign pseudo_reflect_circuit = ShuffleCellsBackwards(MixColumns(ShuffleCells(buf_in)) ^ k1);
 
+  // TweakForward
   wire [63:0] tweak_circuit;
   assign tweak_circuit = TweakForward(buf_tweak);
 
+  // TweakBackwards
   wire [63:0] tweak_inv_circuit;
   assign tweak_inv_circuit = TweakBackwards(buf_tweak);
 
   wire [63:0] w0;
   assign w0 = key[127:64];
   wire [63:0] w1;
-  assign w1 = { key[64], key[127:66], key[65] ^ key[127] };
+  assign w1 = { key[64], key[127:66], key[65] ^ key[127] }; // w0 ^ ROTL64(w0, 1)
+
+  wire [63:0] k0;
+  assign k0 = key[63:0];
+  wire [63:0] k1;
+  assign k1 = key[63:0];
+
+  reg tmp;
+  reg tmp2;
+
+  wire [63:0] round_key;
+  assign round_key =
+    (round[1] || round[15]) ? 64'h13198A2E03707344 :
+    (round[2] || round[14]) ? 64'hA4093822299F31D0 :
+    (round[3] || round[13]) ? 64'h082EFA98EC4E6C89 :
+    (round[4] || round[12]) ? 64'h452821E638D01377 :
+    (round[5] || round[11]) ? 64'hBE5466CF34E90C6C :
+    (round[6] || round[10]) ? 64'h3F84D5B5B5470917 :
+    0;
 
   always @(posedge clk)
   begin
     if (!reset_n)
     begin
       state <= STATE_BUSY;
-      buf_ready <= 0;
 
       buf_out <= 0;
       buf_tweak <= tweak;
       buf_in <= in ^ w0;
 
-      buf_round_key <= key[63:0] ^ tweak;
-      round <= 0;
+      round <= 1;
+      tmp <= 0;
+      tmp2 <= 1;
     end
     else
     begin
       case (state)
           STATE_BUSY:
           begin
-              case (round)
-              0: begin
-                buf_round_key <= 64'h13198A2E03707344 ^ tweak_circuit ^ key[63:0];
-                buf_tweak <= tweak_circuit;
-                buf_in <= partial_round_circuit;
-              end
-              1: begin
-                buf_round_key <= 64'hA4093822299F31D0 ^ tweak_circuit ^ key[63:0];
+              if (tmp == 0) begin
                 buf_tweak <= tweak_circuit;
                 buf_in <= round_circuit;
               end
-              2: begin
-                buf_round_key <= 64'h082EFA98EC4E6C89 ^ tweak_circuit ^ key[63:0];
-                buf_tweak <= tweak_circuit;
-                buf_in <= round_circuit;
-              end
-              3: begin
-                buf_round_key <= 64'h452821E638D01377 ^ tweak_circuit ^ key[63:0];
-                buf_tweak <= tweak_circuit;
-                buf_in <= round_circuit;
-              end
-              4: begin
-                buf_round_key <= 64'hBE5466CF34E90C6C ^ tweak_circuit ^ key[63:0];
-                buf_tweak <= tweak_circuit;
-                buf_in <= round_circuit;
-              end
-              5: begin
-                buf_round_key <= 64'h3F84D5B5B5470917 ^ tweak_circuit ^ key[63:0];
-                buf_tweak <= tweak_circuit;
-                buf_in <= round_circuit;
-              end
-              6: begin
-                buf_round_key <= tweak_circuit ^ w1;
-                buf_tweak <= tweak_circuit;
-                buf_in <= round_circuit;
-              end
-              7: begin
-                buf_round_key <= key[63:0];
-                buf_in <= round_circuit;
-              end
-              8: begin
-                buf_round_key <= buf_tweak ^ w0;
-                buf_in <= pseudo_reflect_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              9: begin
-                buf_round_key <= 64'h3F84D5B5B5470917 ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
+              if (tmp2 == 0) begin
                 buf_in <= round_inv_circuit;
                 buf_tweak <= tweak_inv_circuit;
               end
-              10: begin
-                buf_round_key <= 64'hBE5466CF34E90C6C ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              11: begin
-                buf_round_key <= 64'h452821E638D01377 ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              12: begin
-                buf_round_key <= 64'h082EFA98EC4E6C89 ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              13: begin
-                buf_round_key <= 64'hA4093822299F31D0 ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              14: begin
-                buf_round_key <= 64'h13198A2E03707344 ^ buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              15: begin
-                buf_round_key <= buf_tweak ^ key[63:0] ^ 64'hC0AC29B7C97C50DD;
-                buf_in <= round_inv_circuit;
-                buf_tweak <= tweak_inv_circuit;
-              end
-              16: begin
-                buf_in <= partial_round_inv_circuit;
-              end
-              17: begin
-                buf_out <= buf_in ^ w1;
 
-                buf_ready <= 1;
+              if (round[6]) begin
+                tmp <= 1;
+              end
+              if (round[7]) begin
+                buf_in <= round_circuit;
+              end
+              if (round[8]) begin
+                buf_in <= pseudo_reflect_circuit;
+                tmp2 <= 0;
+              end
+              if (round[16]) begin
+                buf_out <= round_inv_circuit ^ w1;
                 state <= STATE_IDLE;
               end
-              endcase
 
-              round <= round + 1;
+              round <= round << 1;
           end
       endcase
     end

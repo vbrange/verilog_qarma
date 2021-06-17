@@ -171,6 +171,7 @@ module Qarma64(
   endfunction
 
   // Shared SubCells circuitry.
+  /*
   wire [63:0] sub_cells_circuit_in;
   wire [63:0] sub_cells_circuit;
 
@@ -179,21 +180,22 @@ module Qarma64(
     is_bwd ? buf_in :              // rounds using RoundBackward
     0;
   assign sub_cells_circuit = SubCells(sub_cells_circuit_in);
-
+  */
   // Shared ShuffleCellsBackwards+MixColumns+ShuffleCells circuitry.
   wire [63:0] shared_circuit_in;
   wire [63:0] shared_circuit;
 
   wire is_fwd;
-  assign is_fwd =
-    round[0] | round[1] | round[2] | round[3] | 
-    round[4] | round[5] | round[6] | round[7];
+  assign is_fwd = (tmp == 0);
+    /* round[0] | round[1] | round[2] | round[3] | 
+    round[4] | round[5] | round[6] | round[7]; */
 
   wire is_bwd;
-  assign is_bwd =
+  assign is_bwd = (tmp2 == 0);
+  /*
     round[ 9] | round[10] | round[11] | round[12] | 
     round[13] | round[14] | round[15] | round[16];
-
+  */
   assign shared_circuit_in =
     is_fwd ? round_forward_step1 :     // rounds using RoundForward
     is_bwd ? round_inv_circuit_step0 : // rounds using RoundBackward
@@ -209,11 +211,11 @@ module Qarma64(
   wire [63:0] round_forward_step1 = buf_in ^ round_forward_round_key;
   wire [63:0] round_forward_step2 = round[0] ? round_forward_step1 : shared_circuit; // MixColumns(ShuffleCells(round_forward_step1));
   wire [63:0] round_circuit;
-  assign round_circuit = sub_cells_circuit; // SubCells(round_forward_step2);
+  assign round_circuit = SubCells(round_forward_step2); // sub_cells_circuit; // 
 
   // RoundBackwards
   wire [63:0] round_reverse_round_key = round[9] ? (buf_tweak ^ w0) : (k1 ^ round_key ^ buf_tweak ^ 64'hC0AC29B7C97C50DD);
-  wire [63:0] round_inv_circuit_step0 = SubCells(buf_in); // sub_cells_circuit;
+  wire [63:0] round_inv_circuit_step0 = SubCells(buf_in); // sub_cells_circuit; // 
   wire [63:0] round_inv_circuit_step1 = round[16] ? round_inv_circuit_step0 : shared_circuit; //ShuffleCellsBackwards(MixColumns(round_inv_circuit_step0));
   wire [63:0] round_inv_circuit;
   assign round_inv_circuit = round_inv_circuit_step1 ^ round_reverse_round_key;
@@ -273,7 +275,8 @@ module Qarma64(
           STATE_BUSY:
           begin
               if (tmp == 0) begin
-                buf_tweak <= tweak_circuit;
+                if (!round[7])
+                  buf_tweak <= tweak_circuit;
                 buf_in <= round_circuit;
               end
               if (tmp2 == 0) begin
@@ -281,11 +284,8 @@ module Qarma64(
                 buf_tweak <= tweak_inv_circuit;
               end
 
-              if (round[6]) begin
-                tmp <= 1;
-              end
               if (round[7]) begin
-                buf_in <= round_circuit;
+                tmp <= 1;
               end
               if (round[8]) begin
                 buf_in <= pseudo_reflect_circuit;

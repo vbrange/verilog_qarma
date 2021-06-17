@@ -118,13 +118,13 @@ module Qarma64(
 
   function [3:0] LfsrForward (input [3:0] nibble);
   begin
-    LfsrForward = { nibble[0]^nibble[1], nibble[3], nibble[2], nibble[1] };
+    LfsrForward = { nibble[0] ^ nibble[1], nibble[3], nibble[2], nibble[1] };
   end
   endfunction
 
   function [3:0] LfsrBackwards (input [3:0] nibble);
   begin
-    LfsrBackwards = { nibble[2], nibble[1], nibble[0], nibble[0]^nibble[3] };
+    LfsrBackwards = { nibble[2], nibble[1], nibble[0], nibble[0] ^ nibble[3] };
   end
   endfunction
 
@@ -175,27 +175,52 @@ module Qarma64(
   wire [63:0] sub_cells_circuit;
 
   assign sub_cells_circuit_in =
-    tmp2 ? round_forward_step2 : // rounds using RoundForward
-    buf_in; // rounds using RoundBackward
+    is_fwd ? round_forward_step2 : // rounds using RoundForward
+    is_bwd ? buf_in :              // rounds using RoundBackward
+    0;
   assign sub_cells_circuit = SubCells(sub_cells_circuit_in);
 
+  // Shared ShuffleCellsBackwards+MixColumns+ShuffleCells circuitry.
+  wire [63:0] shared_circuit_in;
+  wire [63:0] shared_circuit;
+
+  wire is_fwd;
+  assign is_fwd =
+    round[0] | round[1] | round[2] | round[3] | 
+    round[4] | round[5] | round[6] | round[7];
+
+  wire is_bwd;
+  assign is_bwd =
+    round[ 9] | round[10] | round[11] | round[12] | 
+    round[13] | round[14] | round[15] | round[16];
+
+  assign shared_circuit_in =
+    is_fwd ? round_forward_step1 :     // rounds using RoundForward
+    is_bwd ? round_inv_circuit_step0 : // rounds using RoundBackward
+    buf_in;                            // PseudoReflect
+
+  wire [63:0] shared_circuit_step0 = (is_fwd || round[8]) ? ShuffleCells(shared_circuit_in) : shared_circuit_in;
+  wire [63:0] shared_circuit_step1 = MixColumns(shared_circuit_step0);
+  wire [63:0] shared_circuit_step2 = round[8] ? (shared_circuit_step1 ^ k1) : shared_circuit_step1;
+  assign shared_circuit = (is_bwd || round[8]) ? ShuffleCellsBackwards(shared_circuit_step2) : shared_circuit_step2;
+
   // RoundForward
-  wire [63:0] round_forward_round_key = round[7] ? buf_tweak ^ w1 : k0 ^ round_key ^ buf_tweak;
+  wire [63:0] round_forward_round_key = round[7] ? (buf_tweak ^ w1) : (k0 ^ round_key ^ buf_tweak);
   wire [63:0] round_forward_step1 = buf_in ^ round_forward_round_key;
-  wire [63:0] round_forward_step2 = round[0] ? round_forward_step1 : MixColumns(ShuffleCells(round_forward_step1));
+  wire [63:0] round_forward_step2 = round[0] ? round_forward_step1 : shared_circuit; // MixColumns(ShuffleCells(round_forward_step1));
   wire [63:0] round_circuit;
-  assign round_circuit = sub_cells_circuit; //SubCells(round_forward_step2);
+  assign round_circuit = sub_cells_circuit; // SubCells(round_forward_step2);
 
   // RoundBackwards
-  wire [63:0] round_reverse_round_key = round[9] ? buf_tweak ^ w0 : k1 ^ round_key ^ buf_tweak ^ 64'hC0AC29B7C97C50DD;
-  wire [63:0] round_inv_circuit_step0 = sub_cells_circuit; //SubCells(buf_in);
-  wire [63:0] round_inv_circuit_step1 = round[16] ? round_inv_circuit_step0 : ShuffleCellsBackwards(MixColumns(round_inv_circuit_step0));
+  wire [63:0] round_reverse_round_key = round[9] ? (buf_tweak ^ w0) : (k1 ^ round_key ^ buf_tweak ^ 64'hC0AC29B7C97C50DD);
+  wire [63:0] round_inv_circuit_step0 = SubCells(buf_in); // sub_cells_circuit;
+  wire [63:0] round_inv_circuit_step1 = round[16] ? round_inv_circuit_step0 : shared_circuit; //ShuffleCellsBackwards(MixColumns(round_inv_circuit_step0));
   wire [63:0] round_inv_circuit;
   assign round_inv_circuit = round_inv_circuit_step1 ^ round_reverse_round_key;
 
   // PseudoReflect
   wire [63:0] pseudo_reflect_circuit;
-  assign pseudo_reflect_circuit = ShuffleCellsBackwards(MixColumns(ShuffleCells(buf_in)) ^ k1);
+  assign pseudo_reflect_circuit = shared_circuit; //ShuffleCellsBackwards(MixColumns(ShuffleCells(buf_in)) ^ k1);
 
   // TweakForward
   wire [63:0] tweak_circuit;
